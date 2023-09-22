@@ -1,0 +1,132 @@
+---
+title: "Fish"
+author: "Thomas Lumley"
+date: "2023-04-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setting up the survival times
+
+```{r cars}
+fish<-read.csv("../../data/release_mortality.csv")
+```
+
+Most of the `Control` fish are missing `capture_time` and `total_transfer_time`
+
+```{r}
+with(fish, table(capture_time=="", treatment))
+with(fish, table(total_transfer_time=="", treatment))
+with(fish, table(wait_time=="", treatment))
+```
+
+so we really have to start with `net_release_time`, which is only missing for 6 fish, or `pickup_datetime`
+
+```{r}
+with(fish, table(net_release_time=="", treatment))
+with(fish, table(pickup_datetime=="", treatment))
+```
+
+Transform these to proper date/time objects
+
+```{r}
+fish$pickup<-as.POSIXct(fish$pickup_datetime, format="%Y-%m-%d %H:%M")
+fish$retrieval<-as.POSIXct(paste(fish$retrieval_date,fish$retrieval_time), format="%Y-%m-%d %H:%M")
+fish$release_date<-substr(fish$pickup_datetime,1,10)
+fish$release<-as.POSIXct(paste(fish$release_date,fish$net_release_time), format="%Y-%m-%d %H:%M")
+library(survival)
+mean(fish$release-fish$pickup,na.rm=TRUE)
+max(fish$release-fish$pickup,na.rm=TRUE)
+
+plot(survfit(Surv(retrieval-release, fish_retrieval_fate=="Died")~1,data=fish),mark.time=TRUE,xscale=60,xlab="Hours since release",ylab="Proportion alive")
+plot(survfit(Surv(retrieval-release, fish_retrieval_fate=="Died")~treatment,data=fish),col=c("orange","blue"),xscale=60,xlab="Hours since release",ylab="Proportion alive")
+with(fish, table(treatment, fish_retrieval_fate))
+```
+
+So, all the `Control` fish lived, 83% of the `Recreational` fish lived, and the deaths happened over a short period of time before any of the censoring, so that survival analysis doesn't give much benefit over just a binary analysis.
+
+## Comparisons
+
+### Hook location
+
+Since we know all `Control` fish were lip-hooked and none died, we can either exclude them completely or put them in the `Lip` category. The survival rate for `Control` fish is clearly better than for lip-hooked `Control` fish so it makes sense to exclude the controls.
+
+```{r}
+table(fish$capture_hook_site)
+with(fish, table(capture_hook_site, fish_retrieval_fate))
+recr_fish<-subset(fish, treatment=="Recreational")
+recr_fish$hook_site<-factor(recr_fish$capture_hook_site, c("Lip","Gut","Foul"))
+coxph(Surv(retrieval-release, fish_retrieval_fate=="Died")~hook_site,data=recr_fish)
+plot(survfit(Surv(retrieval-release, fish_retrieval_fate=="Died")~hook_site,data=recr_fish),col=c("sienna","red","black"), xscale=60,xlab="Hours since release",ylab="Proportion alive")
+legend("bottomleft",lty=1,col=c("sienna","red","black"),legend=levels(recr_fish$hook_site),bty="n")
+
+summary(glm(I(fish_retrieval_fate=="Died")~hook_site, data=recr_fish,family=binomial(log)))
+```
+
+There is strong evidence that gut-hooked and foul-hooked fish are more likely to die than lip-hooked fish. The rate of death is about 8 times as high for gut-hooked fish and about twice as high for foul-hooked fish. Alternatively, modelling relative risks of death and ignoring time, gut-hooked fish are about `exp(1.6)` or 5 times as likely to die and foul-hooked fish about `exp(0.68)` or twice as likely to die.
+
+### Capture depth
+
+```{r}
+library(beeswarm)
+beeswarm(capture_depth_m~treatment,data=fish,col=1:2,cex=0.2)
+beeswarm(capture_depth_m~capture_hook_site,data=fish,col=1:4,cex=0.2)
+beeswarm(capture_depth_m~capture_depth_range,data=recr_fish,col=1:4,cex=0.2)
+```
+
+The `Control` fish are very different in capture depth distribution (and we know they all lived), so again we can drop them from the analysis.
+
+```{r}
+coxph(Surv(retrieval-release, fish_retrieval_fate=="Died")~capture_depth_range,data=recr_fish)
+plot(survfit(Surv(retrieval-release, fish_retrieval_fate=="Died")~capture_depth_range,data=recr_fish),col=c("navyblue","royalblue","lightblue"),lwd=2,xscale=60,xlab="Hours since release",ylab="Proportion alive")
+legend("bottomleft",lty=1,col=c("navyblue","royalblue","lightblue"),legend=c("Deep","Medium","Shallow"),bty="n",lwd=2)
+
+```
+
+The rate of death at `Deep` and `Medium` ranges is similar (hazard ratio 0.9 for `Medium` vs `Deep`) but the rate of death at `Shallow` capture range is approximately 5 times lower. There is very strong evidence for this difference.
+
+```{r}
+summary(glm(I(fish_retrieval_fate=="Died")~capture_depth_range,data=recr_fish, family=binomial(log)))
+```
+
+The same conclusions are found with a binary analysis of fish fate: at most a small difference between `Deep` and `Medium` but nearly 5 times lower risk of death at `Shallow`
+
+### Depth in more detail
+
+Here we fit a linear term to depth within the `Shallow` range:
+
+```{r}
+coxph(Surv(retrieval-release, fish_retrieval_fate=="Died")~capture_depth_m, data=subset(recr_fish, capture_depth_range=="Shallow"))
+
+```
+
+There is strong evidence that within the `Shallow` range, mortality increases with depth
+
+```{r}
+library(splines)
+m<-coxph(Surv(retrieval-release, fish_retrieval_fate=="Died")~ns(capture_depth_m,3), data=subset(recr_fish, capture_depth_range="Shallow"))
+termplot(m, ylab="log hazard",se=TRUE, rug=TRUE)
+```
+
+It appears that the mortality rate increases until about 15-20m depth and then becomes roughly constant.
+
+### Combining the factors
+
+```{r}
+m2<-coxph(Surv(retrieval-release, fish_retrieval_fate=="Died")~capture_depth_range*hook_site, data=recr_fish)
+anova(m2)
+summary(m2)
+```
+
+When the factors are combined there is strong evidence that both `capture_depth_range` and `hook_site` affect mortality, and also that the effect of `hook_site` is different at different depths. Specifically, there was much more excess mortality among gut-hooked fish at the `Shallow` depth: the hazard ratio was estimated as 4.75 for `Deep` captures (and approximately the same for `Medium`), but 4.75x14.7=70 times higher at `Shallow` depths.
+
+```{r fig.height=6}
+recr_fish$site_depth<-with(recr_fish, interaction(hook_site, ifelse(capture_depth_range=="Shallow","Shallow","not Shallow"))) 
+plot(survfit(Surv(retrieval-release, fish_retrieval_fate=="Died")~site_depth,data=recr_fish),col=c("sienna","red","black"),lty=c(1,1,1,2,2,2),xscale=60,xlab="Hours since release",ylab="Proportion alive")
+legend("bottomleft",col=c("sienna","red","black"),,lty=c(1,1,1,2,2,2),legend=levels(recr_fish$site_depth),bty="n",ncol=2)
+```
+
+This graph suggests that gut-hooked fish at `Shallow` depths are the *least* likely to survive. I don't think there's enough data to support this strongly, but it is clear that the increased mortality among gut-hooked fish was greater at `Shallow` depths.
